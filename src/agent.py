@@ -18,6 +18,7 @@ from livekit.agents import (
 )
 from livekit.plugins import noise_cancellation, silero, bey
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.agents import metrics, MetricsCollectedEvent
 
 from config import *
 from tools import SessionData, estimate_call_cost, get_tools
@@ -85,7 +86,8 @@ async def my_agent(ctx: JobContext):
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
-    def _on_metrics_collected(ev: metrics.MetricsCollectedEvent):
+    def _on_metrics_collected(ev: MetricsCollectedEvent):
+        metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
         summary = usage_collector.get_summary()
         session.userdata.state.usage_summary = summary
@@ -171,7 +173,7 @@ async def my_agent(ctx: JobContext):
     def on_data_received(data: rtc.DataPacket):
         try:
             message = data.data.decode("utf-8")
-            logger.info("Received data message", extra={"message": message})
+            logger.info("Received data message", extra={"received_message": message})
             
             # Extract phone and name from message
             if "phone number" in message.lower():
