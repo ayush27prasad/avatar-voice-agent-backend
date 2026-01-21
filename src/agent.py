@@ -13,13 +13,14 @@ from livekit.agents import (
     JobProcess,
     cli,
     inference,
+    metrics,
     room_io,
 )
 from livekit.plugins import noise_cancellation, silero, bey
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from config import *
-from tools import SessionData, get_tools
+from tools import SessionData, estimate_call_cost, get_tools
 
 logger = logging.getLogger("agent")
 
@@ -80,6 +81,15 @@ async def my_agent(ctx: JobContext):
             ),
         ),
     )
+
+    usage_collector = metrics.UsageCollector()
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: metrics.MetricsCollectedEvent):
+        usage_collector.collect(ev.metrics)
+        summary = usage_collector.get_summary()
+        session.userdata.state.usage_summary = summary
+        session.userdata.state.estimated_cost = estimate_call_cost(summary)
 
     await session.generate_reply(
         instructions="Greet the user and offer your assistance."

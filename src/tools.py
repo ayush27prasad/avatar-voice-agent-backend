@@ -9,6 +9,12 @@ from typing import Any
 from livekit.agents import RunContext, ToolError, function_tool
 from supabase import Client, create_client
 
+from config import (
+    COST_LLM_COMPLETION_PER_1K,
+    COST_LLM_PROMPT_PER_1K,
+    COST_STT_PER_MIN,
+    COST_TTS_PER_1K_CHARS,
+)
 logger = logging.getLogger("agent.tools")
 
 DEFAULT_DAYS_AHEAD = 7
@@ -21,6 +27,8 @@ class ConversationState:
     name: str | None = None
     preferences: list[str] = field(default_factory=list)
     booked_slots: list[dict[str, str]] = field(default_factory=list)
+    usage_summary: dict[str, Any] = field(default_factory=dict)
+    estimated_cost: float | None = None
 
 
 @dataclass
@@ -155,6 +163,36 @@ def _fetch_user_by_phone(contact_number: str) -> dict[str, Any] | None:
         return None
 
 
+def estimate_call_cost(usage_summary: dict[str, Any]) -> float | None:
+    if not usage_summary:
+        return None
+
+    def _get_number(*keys: str) -> float:
+        for key in keys:
+            value = usage_summary.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
+
+    prompt_tokens = _get_number("llm_prompt_tokens", "prompt_tokens", "prompt_tokens_total")
+    completion_tokens = _get_number("llm_completion_tokens", "completion_tokens", "completion_tokens_total")
+    stt_audio_seconds = _get_number("stt_audio_duration", "stt_audio_seconds", "audio_duration")
+    tts_characters = _get_number("tts_characters_count", "tts_characters", "tts_characters_total", "characters_count")
+
+    total_cost = (
+        (prompt_tokens / 1000.0) * COST_LLM_PROMPT_PER_1K
+        + (completion_tokens / 1000.0) * COST_LLM_COMPLETION_PER_1K
+        + (stt_audio_seconds / 60.0) * COST_STT_PER_MIN
+        + (tts_characters / 1000.0) * COST_TTS_PER_1K_CHARS
+    )
+    if total_cost <= 0:
+        return None
+    return round(total_cost, 4)
+
+
 async def _send_rpc(ctx: RunContext[SessionData], payload: dict[str, Any]) -> None:
     try:
         room = ctx.userdata.room
@@ -279,18 +317,16 @@ def _ensure_user_exists(contact_number: str, name: str | None = None) -> None:
 
 
 @function_tool
-async def get_user_data(
+async def get_session_user_data(
     ctx: RunContext[SessionData],
-    contact_number: str | None = None,
 ) -> str:
-    """Get user data from session, participant attributes/metadata, or database.
+    """Check for user data in session or participant context. Always use this tool in case you do not have any user data.
 
-    Args:
-        contact_number: Optional phone number to lookup if context is missing.
+    This tool does not require a contact number; it only reports what is already available.
     """
     logger.info(
-        "Tool called: get_user_data",
-        extra={"has_contact": contact_number is not None, "has_session_contact": ctx.userdata.state.contact_number is not None},
+        "Tool called: get_session_user_data",
+        extra={"has_session_contact": ctx.userdata.state.contact_number is not None},
     )
     try:
         # 1) Session state
@@ -312,7 +348,7 @@ async def get_user_data(
             _ensure_user_exists(normalized, ctx.userdata.state.name)
             await _notify_tool_event(
                 ctx,
-                tool="get_user_data",
+                tool="get_session_user_data",
                 status="found",
                 data={"contact_number": normalized, "name": ctx.userdata.state.name},
             )
@@ -321,33 +357,15 @@ async def get_user_data(
                 f"Name: {ctx.userdata.state.name or 'unknown'}."
             )
 
-        # 3) Provided contact_number lookup
-        if contact_number:
-            normalized = _normalize_phone_number(contact_number)
-            record = _fetch_user_by_phone(normalized)
-            if record:
-                ctx.userdata.state.contact_number = normalized
-                ctx.userdata.state.name = record.get("name")
-                await _notify_tool_event(
-                    ctx,
-                    tool="get_user_data",
-                    status="found",
-                    data={"contact_number": normalized, "name": ctx.userdata.state.name},
-                )
-                return (
-                    f"User data found in database. Phone: {normalized}, "
-                    f"Name: {ctx.userdata.state.name or 'unknown'}."
-                )
-
         await _notify_tool_event(
             ctx,
-            tool="get_user_data",
+            tool="get_session_user_data",
             status="missing",
             data={},
         )
-        raise ToolError("Ask the user for their phone number to continue.")
+        return "No user data found in session or participant context."
     except Exception as exc:
-        logger.error("Tool failed: get_user_data", exc_info=exc)
+        logger.error("Tool failed: get_session_user_data", exc_info=exc)
         raise
 
 
@@ -357,7 +375,7 @@ async def identify_user(
     contact_number: str,
     name: str | None = None,
 ) -> str:
-    """Identify the user by phone number before booking or retrieving appointments.
+    """Look up the user by phone number in the database.
 
     Args:
         contact_number: The user's phone number with country code.
@@ -373,31 +391,32 @@ async def identify_user(
         if name:
             ctx.userdata.state.name = name.strip()
 
-        # Ensure user exists in database
-        _ensure_user_exists(normalized, ctx.userdata.state.name)
-
-        logger.info(
-            "User identified",
-            extra={
-                "normalized_contact": normalized[:5] + "***",
-                "user_name": ctx.userdata.state.name,
-            }
-        )
+        record = _fetch_user_by_phone(normalized)
+        if record:
+            ctx.userdata.state.name = record.get("name") or ctx.userdata.state.name
+            await _notify_tool_event(
+                ctx,
+                tool="identify_user",
+                status="found",
+                data={"contact_number": normalized, "name": ctx.userdata.state.name},
+            )
+            logger.info(
+                "User found in database",
+                extra={"normalized_contact": normalized[:5] + "***", "user_name": ctx.userdata.state.name},
+            )
+            return (
+                f"I found your record. Phone: {normalized}, "
+                f"Name: {ctx.userdata.state.name or 'unknown'}."
+            )
 
         await _notify_tool_event(
             ctx,
             tool="identify_user",
-            status="identified",
-            data={"contact_number": normalized, "name": ctx.userdata.state.name},
+            status="not_found",
+            data={"contact_number": normalized},
         )
-
-        result = (
-            f"Thanks {ctx.userdata.state.name}. I have your phone number as {normalized}."
-            if ctx.userdata.state.name
-            else f"Thanks. I have your phone number as {normalized}."
-        )
-        logger.debug("Tool completed: identify_user")
-        return result
+        logger.info("User not found in database", extra={"normalized_contact": normalized[:5] + "***"})
+        return "I couldn't find a record for that phone number."
     except Exception as exc:
         logger.error("Tool failed: identify_user", exc_info=exc)
         raise
@@ -888,9 +907,15 @@ async def end_conversation(
             }
         )
 
+        if ctx.userdata.state.estimated_cost is not None:
+            cost_line = f"Estimated cost for this call: ${ctx.userdata.state.estimated_cost:.2f}"
+        else:
+            cost_line = "Estimated cost for this call: $0.00"
+        summary_with_cost = f"{summary}\n{cost_line}" if summary else cost_line
+
         payload = {
             "type": "call_summary",
-            "summary": summary,
+            "summary": summary_with_cost,
             "preferences": preferences,
             "booked_slots": booked_slots,
             "contact_number": normalized_contact,
@@ -908,7 +933,7 @@ async def end_conversation(
 
         summary_record = {
             "contact_number": normalized_contact,
-            "summary": summary,
+            "summary": summary_with_cost,
             "preferences": preferences,
             "booked_slots": booked_slots,
             "created_at": payload["created_at"],
@@ -943,7 +968,7 @@ async def end_conversation(
 
 def get_tools() -> list[Any]:
     return [
-        get_user_data,
+        get_session_user_data,
         identify_user,
         fetch_slots,
         book_appointment,

@@ -31,12 +31,13 @@ Your responses are concise, friendly, and without complex formatting or symbols.
 Today's date: {TODAY_DATE}
 
 Tool usage:
-- Always call get_user_data at the start of a booking-related request to check if user data is already available.
-- If user data is missing or uncertain, ask for the phone number and then call identify_user.
+- Always call get_session_user_data at the start of a booking-related request to check if user data is already available.
+- If user data is missing or uncertain, ask for the phone number and then call identify_user (database lookup).
 - For booking, canceling, or modifying, always extract and pass date, time, name, and contact number.
 - Use AM/PM time format when speaking and when asking for time (e.g., "2:00 PM"). If the user gives a 24-hour time or an ambiguous time, confirm the AM/PM.
 - If any required detail is missing, ask a brief follow-up question before calling a tool.
-- Use fetch_slots to show available hard-coded slots.
+- Use fetch_slots to show available slots. Mention only the available slots of the next two days slots when suggesting times.
+- If asked for a specific duration, mention only the slots that fit that duration or time span.
 - Prevent double-booking and confirm all appointment details verbally.
 
 Conversation end:
@@ -50,3 +51,9 @@ Voice flow (sandwich style):
 """
 
 LIVEKIT_WSS_URL = (os.getenv("LIVEKIT_URL") or "").replace("https://", "wss://", 1)
+
+# Cost estimation (USD). Update to match your provider pricing.
+COST_LLM_PROMPT_PER_1K = 0.0005
+COST_LLM_COMPLETION_PER_1K = 0.0015
+COST_STT_PER_MIN = 0.004
+COST_TTS_PER_1K_CHARS = 0.010
