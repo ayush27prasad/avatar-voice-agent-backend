@@ -163,13 +163,29 @@ def _fetch_user_by_phone(contact_number: str) -> dict[str, Any] | None:
         return None
 
 
-def estimate_call_cost(usage_summary: dict[str, Any]) -> float | None:
-    if not usage_summary:
+def _usage_summary_to_dict(usage_summary: Any) -> dict[str, Any]:
+    if usage_summary is None:
+        return {}
+    if isinstance(usage_summary, dict):
+        return usage_summary
+    if hasattr(usage_summary, "to_dict"):
+        try:
+            return usage_summary.to_dict()
+        except Exception:
+            return {}
+    if hasattr(usage_summary, "__dict__"):
+        return dict(usage_summary.__dict__)
+    return {}
+
+
+def estimate_call_cost(usage_summary: Any) -> float | None:
+    summary = _usage_summary_to_dict(usage_summary)
+    if not summary:
         return None
 
     def _get_number(*keys: str) -> float:
         for key in keys:
-            value = usage_summary.get(key)
+            value = summary.get(key)
             if value is not None:
                 try:
                     return float(value)
